@@ -1,47 +1,83 @@
-import torch
-import torch.nn as nn
+import pandas as pd
+from sklearn.preprocessing import StandardScaler
+from sklearn.impute import KNNImputer
+from sklearn.cluster import KMeans
+from sklearn.mixture import GaussianMixture
 
-class Autoencoder(nn.Module):
-    def __init__(self, input_dim: int, hidden_layers: list, nonlinearity: str):
-        super(Autoencoder, self).__init__()
+def prepare_data(df, features, n_neighbors=5):
+    """
+    Prepares the data for clustering by filtering features, imputing missing values, 
+    and scaling the data.
+    
+    Args:
+        df (pd.DataFrame): The input DataFrame.
+        features (list): List of feature column names to use.
+        n_neighbors (int): Number of neighbors for KNNImputer.
         
-        # Parse nonlinearity
-        if nonlinearity == "ReLU":
-            activation = nn.ReLU()
-        elif nonlinearity == "LeakyReLU":
-            activation = nn.LeakyReLU()
-        elif nonlinearity == "Tanh":
-            activation = nn.Tanh()
-        else:
-            activation = nn.ReLU()
-            
-        # Build Encoder
-        encoder_layers = []
-        current_dim = input_dim
-        for h_dim in hidden_layers:
-            encoder_layers.append(nn.Linear(current_dim, h_dim))
-            encoder_layers.append(activation)
-            current_dim = h_dim
-            
-        # Bottleneck (2D)
-        self.encoder = nn.Sequential(*encoder_layers)
-        self.bottleneck = nn.Linear(current_dim, 2)
-        
-        # Build Decoder
-        decoder_layers = []
-        current_dim = 2
-        
-        # Reverse the hidden layers for decoder
-        for h_dim in reversed(hidden_layers):
-            decoder_layers.append(nn.Linear(current_dim, h_dim))
-            decoder_layers.append(activation)
-            current_dim = h_dim
-            
-        # Output layer
-        decoder_layers.append(nn.Linear(current_dim, input_dim))
-        self.decoder = nn.Sequential(*decoder_layers)
+    Returns:
+        tuple: (imputed_scaled_data, valid_df, scaler) 
+               where valid_df corresponds to rows that weren't fully empty in the features.
+    """
+    # Create a copy to avoid SettingWithCopyWarning
+    work_df = df[['id', 'economy'] + features].copy()
+    
+    # Drop rows where ALL selected features are NaN (cannot cluster these meaningfully)
+    work_df.dropna(subset=features, how='all', inplace=True)
+    
+    X = work_df[features].values
+    
+    # Impute missing values
+    imputer = KNNImputer(n_neighbors=n_neighbors)
+    X_imputed = imputer.fit_transform(X)
+    
+    # Scale data
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X_imputed)
+    
+    return X_scaled, work_df, scaler
 
-    def forward(self, x):
-        encoded = self.bottleneck(self.encoder(x))
-        decoded = self.decoder(encoded)
-        return decoded, encoded
+def run_clustering(X_scaled, method='K-Means', n_clusters=5, covariance_type='full'):
+    """
+    Runs the selected clustering algorithm on the preprocessed data.
+    
+    Args:
+        X_scaled (np.ndarray): The scaled and imputed data.
+        method (str): 'K-Means' or 'GMM (Uniform Prior)'.
+        n_clusters (int): Number of clusters.
+        covariance_type (str): Covariance type for GMM (full, tied, diag, spherical).
+        
+    Returns:
+        tuple: (cluster_labels, cluster_centers)
+               cluster_centers are in the SCALED feature space.
+    """
+    if method == 'K-Means':
+        model = KMeans(n_clusters=n_clusters, random_state=42, n_init="auto")
+        labels = model.fit_predict(X_scaled)
+        centers = model.cluster_centers_
+        
+    elif method == 'GMM (Uniform Prior)':
+        model = GaussianMixture(n_components=n_clusters, covariance_type=covariance_type, random_state=42)
+        labels = model.fit_predict(X_scaled)
+        centers = model.means_
+        
+    else:
+        raise ValueError(f"Unknown clustering method: {method}")
+        
+    return labels, centers
+
+def get_unscaled_centroids(centers, scaler, features):
+    """
+    Converts scaled cluster centers back to their original units for interpretation.
+    
+    Args:
+        centers (np.ndarray): Scaled cluster centers.
+        scaler (StandardScaler): The scaler used in preprocessing.
+        features (list): Feature names corresponding to the columns.
+        
+    Returns:
+        pd.DataFrame: DataFrame containing the unscaled centroids.
+    """
+    unscaled_centers = scaler.inverse_transform(centers)
+    df_centroids = pd.DataFrame(unscaled_centers, columns=features)
+    df_centroids.index.name = 'Cluster'
+    return df_centroids
